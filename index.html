@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TS사료 THI 계산기</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #f7f7f7; }
+    .container { max-width: 700px; width: 90%; margin: 20px auto; padding: 20px; background: #fff; border-radius: 8px; }
+    .logo img { max-width: 150px; display: block; margin: auto; }
+    h2 { text-align: center; margin: 20px 0; }
+    label, select, input, button { width: 100%; margin-top: 10px; padding: 8px; box-sizing: border-box; }
+    button { background: #004a99; color: #fff; border: none; cursor: pointer; }
+    button:hover { background: #003366; }
+    .mode-select { display: flex; gap: 10px; margin-top: 10px; }
+    .mode-select button { flex: 1; }
+    #map { width: 100%; height: 300px; margin-top: 20px; }
+    .result { margin-top: 20px; padding: 10px; background: #f9f9f9; border-radius: 4px; }
+    .section { margin-top: 15px; }
+    .info-box { padding: 10px; background: #fff; border: 1px solid #ddd; border-radius: 4px; }
+    @media (max-width:480px) { #map { height: 200px; } .mode-select { flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo"><img src="./TS.png" alt="TS" /></div>
+    <h2>TS사료 THI 계산기</h2>
+    <label for="breed">축종 선택:</label>
+    <select id="breed">
+      <option value="holstein">홀스타인</option>
+      <option value="hanwoo">한우</option>
+    </select>
+    <div class="mode-select">
+      <button id="btnMap">지도 클릭 모드</button>
+      <button id="btnManual">수동 입력 모드</button>
+    </div>
+    <div id="manual" style="display:none;">
+      <label for="temp">온도 (℃):</label>
+      <input type="number" id="temp" placeholder="30" />
+      <label for="hum">습도 (%):</label>
+      <input type="number" id="hum" placeholder="65" />
+      <button id="calcManual">THI 계산</button>
+    </div>
+    <div id="map"></div>
+    <div class="result" id="output">안내: 모드를 선택하세요.</div>
+  </div>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    // THI 계산
+    function calculateTHI(T, RH) {
+      return ((0.8 * T) + ((RH / 100) * (T - 14.4)) + 46.4).toFixed(1);
+    }
+    // 단계별 데이터
+    const mgmt = {
+      holstein: [
+        {max:72,stage:'양호',text:'적정환경 유지',action:'일반 사양 유지'},
+        {max:78,stage:'주의',text:'온도 상승 경계',action:'환기 강화·그늘 제공'},
+        {max:89,stage:'경고',text:'섭취↓·유량↓·심박↑',action:'선풍기·미스트 가동'},
+        {max:98,stage:'위험',text:'섭취·유량 심각↓',action:'응급 냉각·전해질 보충'},
+        {max:Infinity,stage:'폐사',text:'사망 위험',action:'응급 진료'}
+      ],
+      hanwoo: [
+        {max:72,stage:'양호',text:'적정환경 유지',action:'일반 사양 유지'},
+        {max:78,stage:'주의',text:'온도 상승 경계',action:'환기 강화·그늘 제공'},
+        {max:89,stage:'경고',text:'섭취↓·증체↓',action:'선풍기·미스트 가동'},
+        {max:98,stage:'위험',text:'섭취↓30%·증체↓45~75%',action:'응급 냉각·전해질 보충'},
+        {max:Infinity,stage:'폐사',text:'사망 위험',action:'응급 진료'}
+      ]
+    };
+    // 주소 조회
+    async function getAddress(lat, lon) {
+      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`);
+      if (!res.ok) return '';
+      const data = await res.json();
+      return data.display_name || '';
+    }
+    // 날씨 조회 (Met.no)
+    async function fetchWeather(lat, lon) {
+      const res = await fetch(`https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${lat}&lon=${lon}`, {headers:{'Accept':'application/json'}});
+      const data = await res.json();
+      const d = data.properties.timeseries[0].data.instant.details;
+      return {temp:d.air_temperature,humidity:d.relative_humidity};
+    }
+    // 지도 초기화
+    const map = L.map('map').setView([36.5,127.8],7);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OSM'}).addTo(map);
+    let marker;
+    // UI 요소
+    const btnMap=document.getElementById('btnMap'),btnManual=document.getElementById('btnManual');
+    const manualDiv=document.getElementById('manual'),mapDiv=document.getElementById('map');
+    const output=document.getElementById('output');
+    const tempInput=document.getElementById('temp'),humInput=document.getElementById('hum');
+    const breedSelect=document.getElementById('breed');
+    // 모드 설정
+    function setMode(mode){
+      manualDiv.style.display=mode==='manual'?'block':'none';
+      mapDiv.style.display=mode==='map'?'block':'none';
+      output.textContent=mode==='map'?'지도 클릭하여 위치 선택':'수동 입력 후 계산';
+      if(marker){map.removeLayer(marker);marker=null;}map.invalidateSize();
+    }
+    btnMap.onclick=()=>setMode('map');btnManual.onclick=()=>setMode('manual');setMode('map');
+    // 결과 표시
+    async function showResult(temp,hum,addr=''){
+      const thi=+calculateTHI(temp,hum);
+      const entry=mgmt[breedSelect.value].find(x=>thi<=x.max);
+      const color=thi<72?'black':thi<78?'green':thi<89?'orange':thi<98?'red':'purple';
+      output.innerHTML=`<div class='section'><strong>주소:</strong> ${addr}</div><div class='section'><strong>기온:</strong> ${temp}℃ <strong>습도:</strong> ${hum}%</div><div class='section'><h3>THI: <span style='color:${color};font-size:2em;'>${thi}</span> (${entry.stage})</h3></div><div class='section'><strong>설명:</strong> ${entry.text}</div><div class='section'><strong>조치:</strong> ${entry.action}</div>`;
+    }
+    // 지도 클릭 이벤트
+    map.on('click',async e=>{
+      if(manualDiv.style.display==='block')return;
+      const{lat,lng}=e.latlng;
+      if(marker)map.removeLayer(marker);marker=L.marker([lat,lng]).addTo(map);
+      output.textContent='불러오는 중...';
+      try{const[w,addr]=await Promise.all([fetchWeather(lat,lng),getAddress(lat,lng)]);showResult(w.temp,w.humidity,addr);}catch(err){output.textContent=err.message;}
+    });
+    // 수동 계산
+    document.getElementById('calcManual').onclick=null;
+    manualDiv.addEventListener('click',e=>{if(e.target.id==='calcManual'){const T=parseFloat(tempInput.value),H=parseFloat(humInput.value);if(isNaN(T)||isNaN(H)){alert('값 입력');return;}showResult(T,H);}});
+  </script>
+</body>
+</html>
